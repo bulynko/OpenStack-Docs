@@ -1,0 +1,205 @@
+
+
+ ____ ____  _   _     __  __ _   _ _   _____ ___ ____    _    ____ _____ 
+/ ___/ ___|| | | |   |  \/  | | | | | |_   _|_ _/ ___|  / \  / ___|_   _|
+\___ \___ \| |_| |   | |\/| | | | | |   | |  | | |     / _ \ \___ \ | |  
+ ___) |__) |  _  |   | |  | | |_| | |___| |  | | |___ / ___ \ ___) || |  
+|____/____/|_| |_|   |_|  |_|\___/|_____|_| |___\____/_/   \_\____/ |_|  
+  
+ author: Marcin Bulynko e-mail: marcin@storage2storage.com
+
+Network topology:
+====================
+
+
+
+                       .-,(  ),-.    
+                    .-(          )-. 
+                   (    internet    )      VPN
+        -----------------------------------------.
+192.168.254.220         '-.( ).-'                |
+    ____                                         v  
+   |local                                    14.14.14.243            ____
+   |____|                                     ____   __             |====|
+   /::::/                                    |remote|==|            |    |
+  12.219.47.201                              |____| |  |            |CISCO
+                                             /::::/ |__|            |____|
+   ============|                            12.219.47.243       12.219.47.193   
+          .---------------------------------==================================
+          |                                                    |  224.x.x.x
+          |               6000 km (200ms)                      |  Multicast
+          | SSH tunnel with TAP device (12.219.47.192/26)      |
+          |  ssh -NTCf -o Tunnel=ethernet -w 5:5 14.14.14.243  |
+          '----------------------------------------------------'
+
+
+Tunnel over TAP and Bridge:
+=================================
+
+
+       .----------------.                              .----------------.
+       |                |                              |                |
+       |     LINUX      |                              |    LINUX       |
+       |                |                              |                |
+       '----------------'                              '----------------'
+       |                |                              |                |
+       |  Bridge  br0   |                              |   Bridge br0   |
+       |                |                              |                |
+       .--------.-------.          .-,(  ),-.          .-------.--------.
+       |        |       |       .-(          )-.       |       |        |
+       | Ether1 | TAP0  |      (    internet    )      | TAP0  | Ether1 |
+       |        |       ================================       |        |
+       '--------'-------'           '-.( ).-'          '-------'--------'
+
+
+
+Local Server (Multicast receiver) :  
+==============================
+system: WRK220
+Ubuntu 12.04 
+IP1: 192.168.254.220 (source tunnel connetion "FROM")
+IP2: 12.219.47.201/26 (local multicast receiver IP - not connected yet)
+LAN1-192.168.254.0/24
+LAN2-12.219.47.192/26  (isolated without tunnel - not yet connected)
+GW: 192.168.254.50 (VPN connection one way to remote site)
+Internet-GW: 192.168.254.254 (not used)
+
+
+
+Remote Server (Multicast receiver at remote location - tunnel target) :  
+==============================
+system: OWL243
+Ubuntu 12.04 
+IP1: 14.14.14.243 (target tunnel connetion)
+IP2: 12.219.47.243/26 (remote multicast network)
+LAN1-14.14.14.0/24
+LAN2-12.219.47.192/26
+Internet-GW: 14.14.14.2 (not used)
+
+
+Remote Cisco Multicast Gateway/PIMD router :  
+==============================
+Cisco 819
+IP1: 12.219.47.193/26 (remote multicast router)
+LAN2-12.219.47.192/26
+Internet-GW: 14.14.14.2 (not used)
+
+
+=======================================================================================
+Problem:
+
+a)  merge networks ,  "local server"(WRK220)  tunnel to  "remote server"(OWL243) LAN2-12.219.47.192/26
+Remote Multicast Gateway -----6000km(200ms)-->  Local (Multicast receiver)
+
+b) Build Tunnel , connect LAN2-12.219.47.192/26 networks
+12.219.47.193----LAN----Bridge(12.219.47.243)--TAPdev------WAN:6000km-----TAPdev--Bridge(12.219.47..201)--LocalServer
+ 
+
+========================================================================================
+Solution:
+
+1. Enable remote ssh  for root without password (/root/.ssh/authorised_keys only)  :
+   [local-server] -----ssh----> [remote-server]
+
+  Note ,  one direction connection is required only:  
+   Test from local server as root(from WRK220):  
+   ssh 14.14.14.243  date  
+   
+   There is No need for reverse ssh ,  tunnel will be created from local server to the remote server.
+
+2. Enable  SSH for tunneling
+
+a)    edit option in  /etc/ssh/sshd_config
+     
+    PermitTunnel  yes
+
+b)   restart sshd (or reboot server)
+
+
+
+3.  Create bridge device on top of Ethernet Device connected to LAN2-12.219.47.192/26 (Multicast network) . 
+ On both servers: Local & Remote /etc/network/interfaces :
+  
+-------------local-server---------------------
+auto br0
+iface br0 inet static
+        address 12.219.47.201
+        netmask 255.255.255.192
+        network 12.219.47.192
+        broadcast 12.219.47.255
+        bridge_ports eth1 
+        bridge_fd 9
+        bridge_hello 2
+        bridge_maxage 12
+        bridge_stp off
+-------------------------------------------------
+
+
+-------------remote-server---------------------
+auto br0
+iface br0 inet static
+        address 12.219.47.243
+        netmask 255.255.255.192
+        network 12.219.47.192
+        broadcast 12.219.47.255
+        bridge_ports eth1
+        bridge_fd 9
+        bridge_hello 2
+        bridge_maxage 12
+        bridge_stp off
+-------------------------------------------------
+
+
+4.  Create Tunnel with TAP devcie (layer2 as Ethernet link)
+
+a)  from local server execute :
+
+ ssh -NTCf -o Tunnel=ethernet -w 5:5 14.14.14.243
+
+b) verify tap5 devcie is created on both servers Local and Remote:
+
+   ifconfig -a
+
+
+5. Connect bridge devces(booth locations) over TAPdevcie (layer2 link)
+
+a) execute script on local server:
+-----------------------------
+CMD1="ip link set tap5 multicast on"
+CMD2=" ip link set tap5 up"
+CMD3="brctl addif br0 tap5"
+RHOST=14.14.14.243
+eval "$CMD1"
+eval "$CMD2"
+eval "$CMD3"
+ssh $RHOST  "$CMD1"
+ssh $RHOST  "$CMD2"
+ssh $RHOST  "$CMD3"
+------------------------------
+
+b) Test ping  from local server to multicast netowrk (remote + multicast router):
+
+ping -c 5 12.219.47.243
+ping -c 5 12.219.47.193
+
+6. Update local server routes to multicast source  - optional
+
+ route add -net 49.40.132.0/24  gw 12.219.47.193
+
+  
+7. Test the Multicast on your local server , 6000km away !
+
+a)  join multicast group (it helps to run first time on both servers Local&Remote the same time)
+ mcfirst -I br0 -c 10  49.40.132.81  224.0.12.45  4040
+ mcfirst -I br0 -c 10  12.219.47.243  230.1.1.1  4040
+
+b) check the local server bridge TCP/UDP packeges :
+ tcpdump -pni  br0
+
+c) generate Multicast trafic at remote location :
+   mz br0 -c  0 -d 40msec -B 230.1.1.1 -t udp dp=32000 -P "Multicast test packet" 
+
+
+
+
+
